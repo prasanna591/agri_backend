@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-multipart
+torch
+torchvision
+timm
+Pillow
+numpy
+grad-cam      # pip name: grad-cam OR pytorch-grad-cam based on your env; recommended: pip install grad-cam

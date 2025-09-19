@@ -1,135 +1,92 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query
-from fastapi.responses import JSONResponse
+# filename: disease_detector.py
+
+import os
+import google.generativeai as genai
+from fastapi import APIRouter, File, UploadFile, HTTPException
 from PIL import Image
 import io
-import os
 import json
-import torch
-import torch.nn.functional as F
-import torchvision.transforms as T
-import timm
+from dotenv import load_dotenv
 
-router = APIRouter()
+# --- Load Environment Variables (can be done in main.py, but safe to have here too) ---
+load_dotenv()
 
-# ----------------------------
-# Config (edit these paths)
-# ----------------------------
-WEIGHTS_PATH = "weights.pth"     # put your fine-tuned model weights here
-LABELS_PATH = "labels.json"      # JSON list of class names
-MODEL_NAME = "efficientnet_b0"   # must match model trained
-IMG_SIZE = 224
-TOP_K = 3
+# --- Create a Router instead of a full FastAPI app ---
+router = APIRouter(
+    prefix="/disease",
+    tags=["Disease Detector"],
+)
 
-# ----------------------------
-# Load labels
-# ----------------------------
-if os.path.exists(LABELS_PATH):
-    with open(LABELS_PATH, "r", encoding="utf-8") as f:
-        CLASSES = json.load(f)
+# --- Gemini API Configuration ---
+API_KEY = os.getenv("GOOGLE_API_KEY") # Ensure this is the correct variable name from your .env file
+
+if not API_KEY:
+    print("ERROR: GOOGLE_API_KEY not found. Disease detector will not work.")
+    model = None
 else:
-    CLASSES = [
-        "Healthy Leaf",
-        "Leaf Blight",
-        "Powdery Mildew",
-        "Rust",
-        "Leaf Spot",
-    ]
-NUM_CLASSES = len(CLASSES)
-
-# ----------------------------
-# Build + load model
-# ----------------------------
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-def build_model():
-    model = timm.create_model(MODEL_NAME, pretrained=False, num_classes=NUM_CLASSES)
-    return model
-
-model = build_model()
-if os.path.exists(WEIGHTS_PATH):
-    state = torch.load(WEIGHTS_PATH, map_location="cpu")
-    if isinstance(state, dict) and "state_dict" in state:
-        state = state["state_dict"]
-    new_state = {k.replace("module.", ""): v for k, v in state.items()}
-    model.load_state_dict(new_state, strict=False)
-else:
-    print(f"[WARN] Weights file not found at {WEIGHTS_PATH}, using random init")
-
-model.to(device)
-model.eval()
-
-# ----------------------------
-# Preprocessing
-# ----------------------------
-preprocess = T.Compose([
-    T.Resize(int(IMG_SIZE * 1.15)),
-    T.CenterCrop(IMG_SIZE),
-    T.ToTensor(),
-    T.Normalize(mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]),
-])
-
-def read_imagefile(file_bytes: bytes) -> Image.Image:
     try:
-        return Image.open(io.BytesIO(file_bytes)).convert("RGB")
+        genai.configure(api_key=API_KEY)
+        # Switched to the latest supported model for vision tasks
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        print("Disease detector model loaded successfully.")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
+        print(f"Error configuring Gemini API for disease detector: {e}")
+        model = None
 
-def predict_tensor(input_tensor: torch.Tensor, topk: int = TOP_K):
-    input_tensor = input_tensor.to(device)
-    with torch.no_grad():
-        logits = model(input_tensor)
-        probs = F.softmax(logits, dim=1)
-        top_probs, top_idxs = torch.topk(probs, k=topk, dim=1)
-    top_probs = top_probs.cpu().numpy()[0].tolist()
-    top_idxs = top_idxs.cpu().numpy()[0].tolist()
-    results = [{"label": CLASSES[idx], "confidence": round(float(p), 4)}
-               for idx, p in zip(top_idxs, top_probs)]
-    return results
+# --- Prompt Configuration ---
+system_prompt = """
+You are an expert botanist and plant pathologist. Your task is to analyze an image of a plant leaf and identify any diseases.
 
-# ----------------------------
-# Recommendations mapping
-# ----------------------------
-RECOMMENDATIONS = {
-    "Healthy Leaf": ["No action needed. Monitor regularly."],
-    "Leaf Blight": ["Remove infected leaves", "Apply approved fungicide", "Avoid overhead irrigation"],
-    "Powdery Mildew": ["Use sulfur-based sprays", "Improve airflow"],
-    "Rust": ["Remove infected material", "Apply copper fungicide if allowed"],
-    "Leaf Spot": ["Improve soil drainage", "Apply targeted fungicide"],
+Your response must be in a JSON format with the following structure:
+{
+  "disease_name": "Name of the disease or 'Healthy'",
+  "precautions": [
+    "Precaution 1",
+    "Precaution 2"
+  ],
+  "remedies": [
+    "Remedy 1",
+    "Remedy 2"
+  ],
+  "medicines": [
+    {
+      "name": "Medicine Name 1",
+      "mixing_ratio": "Mixing ratio for Medicine 1 (e.g., '10ml per 1 liter of water')"
+    }
+  ]
 }
 
-def get_recommendations(label: str):
-    return RECOMMENDATIONS.get(label, ["Consult local expert", "Collect sample for lab test"])
+If the plant in the image appears healthy, set the "disease_name" to "Healthy" and provide general plant care tips in the other fields. If the image is not of a plant or the disease cannot be identified, return an appropriate message within the JSON structure, perhaps setting the disease_name to "Identification Failed".
+"""
 
-# ----------------------------
-# FastAPI route
-# ----------------------------
+# --- API Endpoint Definition ---
 @router.post("/predict")
-async def predict_disease(
-    file: UploadFile = File(...),
-    top_k: int = Query(3, ge=1, le=10)
-):
-    # 1) Read file
-    image_bytes = await file.read()
-    img = read_imagefile(image_bytes)
+async def predict(file: UploadFile = File(...)):
+    """
+    Receives an image file, sends it to Gemini for analysis,
+    and returns the structured disease information.
+    """
+    if not model:
+        raise HTTPException(status_code=503, detail="AI Model is not available or configured correctly.")
 
-    # 2) Preprocess
-    input_tensor = preprocess(img).unsqueeze(0)
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File provided is not an image.")
 
-    # 3) Predict
     try:
-        results = predict_tensor(input_tensor, topk=top_k)
+        contents = await file.read()
+        image = Image.open(io.BytesIO(contents))
+
+        # --- Gemini API Call ---
+        response = model.generate_content([system_prompt, image])
+        
+        # Extract and clean the JSON text from the response
+        json_text = response.text.strip()
+        if json_text.startswith("```json"):
+            json_text = json_text[7:-3].strip() # Remove markdown code block
+
+        result = json.loads(json_text)
+        return result
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Inference error: {e}")
-
-    # 4) Build response
-    top_result = results[0]
-    recs = get_recommendations(top_result["label"])
-
-    return JSONResponse(content={
-        "prediction": top_result["label"],
-        "confidence": top_result["confidence"],
-        "top_k": results,
-        "recommendations": recs,
-        "image_size": f"{img.width}x{img.height}"
-    })
+        print(f"An error occurred during prediction: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing the image: {e}")

@@ -1,6 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import disease, chatbot, marketplace, orders, products
+from dotenv import load_dotenv
+import os
+
+load_dotenv()  # This loads .env into environment variables
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -9,6 +15,12 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Use startup event to initialize services
+@app.on_event("startup")
+async def startup_event():
+    chatbot.start_chatbot_services()
+
+    
 # ✅ Enable CORS
 app.add_middleware(
     CORSMiddleware,

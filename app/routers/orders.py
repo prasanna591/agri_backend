@@ -13,6 +13,9 @@ class Order(BaseModel):
     product_ids: List[int]
     total_price: float
 
+class OrderCreate(BaseModel):
+    product_ids: List[int]
+
 # In-memory orders store
 orders_db: List[Order] = []
 
@@ -24,21 +27,20 @@ def get_all_orders():
     return orders_db
 
 @router.post("/create", response_model=Order)
-def create_order(product_ids: List[int]):
-    # Validate products
+def create_order(order_req: OrderCreate):
     selected_products = []
     total = 0.0
-    for pid in product_ids:
+
+    for pid in order_req.product_ids:
         product = next((p for p in products_db if p.id == pid), None)
         if not product:
             raise HTTPException(status_code=404, detail=f"Product ID {pid} not found")
         selected_products.append(product)
         total += product.price
 
-    # Create order
     new_order = Order(
         id=len(orders_db) + 1,
-        product_ids=product_ids,
+        product_ids=order_req.product_ids,
         total_price=total,
     )
     orders_db.append(new_order)
